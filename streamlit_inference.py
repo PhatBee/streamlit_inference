@@ -2,6 +2,8 @@
 
 import io
 import av
+import asyncio
+import nest_asyncio
 from typing import Any
 import cv2
 from ultralytics import YOLO
@@ -9,6 +11,9 @@ from ultralytics.utils import LOGGER
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.downloads import GITHUB_ASSETS_STEMS
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+
+# Apply async loop patch for Streamlit
+nest_asyncio.apply()
 
 class VideoProcessor(VideoTransformerBase):
     """Handles real-time video processing with YOLO model."""
@@ -118,14 +123,21 @@ class Inference:
         
         if self.source == "webcam":
             self.configure()
-            # In the inference() method's webrtc_streamer call:
             webrtc_ctx = webrtc_streamer(
                 key="yolo-webrtc",
-                video_processor_factory=lambda: VideoProcessor(...),
+                video_processor_factory=lambda: VideoProcessor(
+                    self.model,
+                    self.conf,
+                    self.iou,
+                    self.selected_ind,
+                    self.enable_trk
+                ),
                 rtc_configuration=RTCConfiguration({
                     "iceServers": [
-                        {"urls": ["stun:stun1.l.google.com:19302",
-                                  "stun:stun2.l.google.com:19302"]}
+                        {"urls": [
+                            "stun:stun1.l.google.com:19302",
+                            "stun:stun2.l.google.com:19302"
+                        ]}
                     ]
                 }),
                 media_stream_constraints={"video": True, "audio": False},
