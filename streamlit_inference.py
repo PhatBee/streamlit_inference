@@ -1,263 +1,160 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import io
+import av
 from typing import Any
-import os
-
 import cv2
-
 from ultralytics import YOLO
 from ultralytics.utils import LOGGER
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.downloads import GITHUB_ASSETS_STEMS
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 
+class VideoProcessor(VideoTransformerBase):
+    """Custom video processor for real-time webcam inference."""
+    def __init__(self, model, conf, iou, selected_ind, enable_trk):
+        self.model = model
+        self.conf = conf
+        self.iou = iou
+        self.selected_ind = selected_ind
+        self.enable_trk = enable_trk
+
+    def recv(self, frame):
+        """Process each video frame."""
+        img = frame.to_ndarray(format="bgr24")
+        
+        if self.enable_trk == "Yes":
+            results = self.model.track(
+                img, conf=self.conf, iou=self.iou, classes=self.selected_ind, persist=True
+            )
+        else:
+            results = self.model(img, conf=self.conf, iou=self.iou, classes=self.selected_ind)
+
+        annotated_frame = results[0].plot()
+        return av.VideoFrame.from_ndarray(annotated_frame, format="bgr24")
 
 class Inference:
-    """
-    A class to perform object detection, image classification, image segmentation and pose estimation inference.
-
-    This class provides functionalities for loading models, configuring settings, uploading video files, and performing
-    real-time inference using Streamlit and Ultralytics YOLO models.
-
-    Attributes:
-        st (module): Streamlit module for UI creation.
-        temp_dict (dict): Temporary dictionary to store the model path and other configuration.
-        model_path (str): Path to the loaded model.
-        model (YOLO): The YOLO model instance.
-        source (str): Selected video source (webcam or video file).
-        enable_trk (str): Enable tracking option ("Yes" or "No").
-        conf (float): Confidence threshold for detection.
-        iou (float): IoU threshold for non-maximum suppression.
-        org_frame (Any): Container for the original frame to be displayed.
-        ann_frame (Any): Container for the annotated frame to be displayed.
-        vid_file_name (str | int): Name of the uploaded video file or webcam index.
-        selected_ind (List[int]): List of selected class indices for detection.
-
-    Methods:
-        web_ui: Sets up the Streamlit web interface with custom HTML elements.
-        sidebar: Configures the Streamlit sidebar for model and inference settings.
-        source_upload: Handles video file uploads through the Streamlit interface.
-        configure: Configures the model and loads selected classes for inference.
-        inference: Performs real-time object detection inference.
-
-    Examples:
-        >>> inf = Inference(model="path/to/model.pt")  # Model is an optional argument
-        >>> inf.inference()
-    """
-
+    """Main inference class with Streamlit integration."""
     def __init__(self, **kwargs: Any):
-        """
-        Initialize the Inference class, checking Streamlit requirements and setting up the model path.
-
-        Args:
-            **kwargs (Any): Additional keyword arguments for model configuration.
-        """
-        check_requirements("streamlit>=1.29.0")  # scope imports for faster ultralytics package load speeds
+        check_requirements("streamlit>=1.29.0")
         import streamlit as st
-
-        self.st = st  # Reference to the Streamlit module
-        self.source = None  # Video source selection (webcam or video file)
-        self.enable_trk = False  # Flag to toggle object tracking
-        self.conf = 0.25  # Confidence threshold for detection
-        self.iou = 0.45  # Intersection-over-Union (IoU) threshold for non-maximum suppression
-        self.org_frame = None  # Container for the original frame display
-        self.ann_frame = None  # Container for the annotated frame display
-        self.vid_file_name = None  # Video file name or webcam index
-        self.selected_ind = []  # List of selected class indices for detection
-        self.model = None  # YOLO model instance
-
+        
+        self.st = st
+        self.source = None
+        self.enable_trk = False
+        self.conf = 0.25
+        self.iou = 0.45
+        self.org_frame = None
+        self.ann_frame = None
+        self.vid_file_name = None
+        self.selected_ind = []
+        self.model = None
         self.temp_dict = {"model": None, **kwargs}
-        self.model_path = None  # Model file path
-        if self.temp_dict["model"] is not None:
-            self.model_path = self.temp_dict["model"]
+        self.model_path = self.temp_dict["model"] if self.temp_dict["model"] else None
 
         LOGGER.info(f"Ultralytics Solutions: ✅ {self.temp_dict}")
 
-    def is_cloud_environment(self):
-        """Check if the app is running in a cloud environment like Streamlit Cloud"""
-        # Various environment variables that might indicate cloud deployment
-        return any([
-            os.environ.get('STREAMLIT_SHARING') == 'true',
-            os.environ.get('IS_STREAMLIT_CLOUD') == 'true',
-            os.environ.get('HEROKU_APP_ID'),
-            os.environ.get('DYNO')
-        ])
-
     def web_ui(self):
-        """Sets up the Streamlit web interface with custom HTML elements."""
-        menu_style_cfg = """<style>MainMenu {visibility: hidden;}</style>"""  # Hide main menu style
-
-        # Main title of streamlit application
-        main_title_cfg = """<div><h1 style="color:#FF64DA; text-align:center; font-size:40px; margin-top:-50px;
+        """Configure Streamlit UI elements."""
+        menu_style = """<style>MainMenu {visibility: hidden;}</style>"""
+        main_title = """<div><h1 style="color:#FF64DA; text-align:center; font-size:40px; margin-top:-50px;
         font-family: 'Archivo', sans-serif; margin-bottom:20px;">Ultralytics YOLO Streamlit Application</h1></div>"""
+        sub_title = """<div><h4 style="color:#042AFF; text-align:center; font-family: 'Archivo', sans-serif; 
+        margin-top:-15px; margin-bottom:50px;">Real-time object detection with Ultralytics YOLO! 🚀</h4></div>"""
 
-        # Subtitle of streamlit application
-        sub_title_cfg = """<div><h4 style="color:#042AFF; text-align:center; font-family: 'Archivo', sans-serif; 
-        margin-top:-15px; margin-bottom:50px;">Experience real-time object detection on your webcam with the power 
-        of Ultralytics YOLO! 🚀</h4></div>"""
-
-        # Set html page configuration and append custom HTML
         self.st.set_page_config(page_title="Ultralytics Streamlit App", layout="wide")
-        self.st.markdown(menu_style_cfg, unsafe_allow_html=True)
-        self.st.markdown(main_title_cfg, unsafe_allow_html=True)
-        self.st.markdown(sub_title_cfg, unsafe_allow_html=True)
+        self.st.markdown(menu_style, unsafe_allow_html=True)
+        self.st.markdown(main_title, unsafe_allow_html=True)
+        self.st.markdown(sub_title, unsafe_allow_html=True)
 
     def sidebar(self):
-        """Configure the Streamlit sidebar for model and inference settings."""
-        with self.st.sidebar:  # Add Ultralytics LOGO
+        """Configure sidebar elements."""
+        with self.st.sidebar:
             logo = "https://raw.githubusercontent.com/ultralytics/assets/main/logo/Ultralytics_Logotype_Original.svg"
             self.st.image(logo, width=250)
+            self.st.title("User Configuration")
+            self.source = self.st.selectbox("Video Source", ("webcam", "video"))
+            self.enable_trk = self.st.radio("Enable Tracking", ("Yes", "No"))
+            self.conf = float(self.st.slider("Confidence Threshold", 0.0, 1.0, self.conf, 0.01))
+            self.iou = float(self.st.slider("IoU Threshold", 0.0, 1.0, self.iou, 0.01))
 
-        self.st.sidebar.title("User Configuration")  # Add elements to vertical setting menu
-        self.source = self.st.sidebar.selectbox(
-            "Video",
-            ("webcam", "video"),
-        )  # Add source selection dropdown
-        self.enable_trk = self.st.sidebar.radio("Enable Tracking", ("Yes", "No"))  # Enable object tracking
-        self.conf = float(
-            self.st.sidebar.slider("Confidence Threshold", 0.0, 1.0, self.conf, 0.01)
-        )  # Slider for confidence
-        self.iou = float(self.st.sidebar.slider("IoU Threshold", 0.0, 1.0, self.iou, 0.01))  # Slider for NMS threshold
-
-        col1, col2 = self.st.columns(2)  # Create two columns for displaying frames
-        self.org_frame = col1.empty()  # Container for original frame
-        self.ann_frame = col2.empty()  # Container for annotated frame
+        col1, col2 = self.st.columns(2)
+        self.org_frame = col1.empty()
+        self.ann_frame = col2.empty()
 
     def source_upload(self):
-        """Handle video file uploads through the Streamlit interface."""
+        """Handle video file uploads."""
         self.vid_file_name = ""
-        
-        # Check if we're in cloud environment
-        if self.is_cloud_environment() and self.source == "webcam":
-            self.st.warning("⚠️ Webcam access may be limited when deployed to Streamlit sharing. " +
-                          "For best results, please use the 'video' option and upload a video file.")
-        
         if self.source == "video":
-            vid_file = self.st.sidebar.file_uploader("Upload Video File", type=["mp4", "mov", "avi", "mkv"])
-            if vid_file is not None:
-                g = io.BytesIO(vid_file.read())  # BytesIO Object
-                with open("ultralytics.mp4", "wb") as out:  # Open temporary file as bytes
-                    out.write(g.read())  # Read bytes into file
-                self.vid_file_name = "ultralytics.mp4"
-        elif self.source == "webcam":
-            self.vid_file_name = 0  # Use webcam index 0
-
-    def capture_webcam_image(self):
-        """Capture a single image from webcam for demo purposes"""
-        self.st.info("📸 Click the button below to capture a single frame from your webcam")
-        if self.st.button("Capture Image"):
-            try:
-                cap = cv2.VideoCapture(0)
-                success, frame = cap.read()
-                cap.release()
-                
-                if success:
-                    # Process the single frame with the model
-                    if self.enable_trk == "Yes":
-                        results = self.model.track(
-                            frame, conf=self.conf, iou=self.iou, classes=self.selected_ind, persist=True
-                        )
-                    else:
-                        results = self.model(frame, conf=self.conf, iou=self.iou, classes=self.selected_ind)
-                        
-                    annotated_frame = results[0].plot()
-                    
-                    # Display frames
-                    self.org_frame.image(frame, channels="BGR")
-                    self.ann_frame.image(annotated_frame, channels="BGR")
-                    return True
-                else:
-                    self.st.error("Failed to capture webcam image. Please try again or upload a video.")
-                    return False
-            except Exception as e:
-                self.st.error(f"Error accessing webcam: {str(e)}")
-                return False
-        return False
+            vid_file = self.st.sidebar.file_uploader("Upload Video", type=["mp4", "mov", "avi", "mkv"])
+            if vid_file:
+                g = io.BytesIO(vid_file.read())
+                with open("temp_video.mp4", "wb") as out:
+                    out.write(g.read())
+                self.vid_file_name = "temp_video.mp4"
 
     def configure(self):
-        """Configure the model and load selected classes for inference."""
-        # Add dropdown menu for model selection
+        """Configure model and classes."""
         available_models = [x.replace("yolo", "YOLO") for x in GITHUB_ASSETS_STEMS if x.startswith("yolo11")]
-        if self.model_path:  # If user provided the custom model, insert model without suffix as *.pt is added later
+        if self.model_path:
             available_models.insert(0, self.model_path.split(".pt")[0])
+            
         selected_model = self.st.sidebar.selectbox("Model", available_models)
-
-        with self.st.spinner("Model is downloading..."):
-            try:
-                self.model = YOLO(f"{selected_model.lower()}.pt")  # Load the YOLO model
-                class_names = list(self.model.names.values())  # Convert dictionary to list of class names
-                self.st.success("Model loaded successfully!")
-            except Exception as e:
-                self.st.error(f"Error loading model: {str(e)}")
-                return False
-
-        # Multiselect box with class names and get indices of selected classes
+        with self.st.spinner("Loading model..."):
+            self.model = YOLO(f"{selected_model.lower()}.pt")
+            class_names = list(self.model.names.values())
+        self.st.success("Model loaded!")
+        
         selected_classes = self.st.sidebar.multiselect("Classes", class_names, default=class_names[:3])
         self.selected_ind = [class_names.index(option) for option in selected_classes]
-
-        if not isinstance(self.selected_ind, list):  # Ensure selected_options is a list
-            self.selected_ind = list(self.selected_ind)
-            
-        return True
+        self.selected_ind = list(self.selected_ind) if not isinstance(self.selected_ind, list) else self.selected_ind
 
     def inference(self):
-        """Perform real-time object detection inference on video or webcam feed."""
-        self.web_ui()  # Initialize the web interface
-        self.sidebar()  # Create the sidebar
-        self.source_upload()  # Upload the video source
+        """Main inference pipeline."""
+        self.web_ui()
+        self.sidebar()
         
-        if not self.configure():  # Configure the app
-            return
+        if self.source == "webcam":
+            self.configure()
+            ctx = webrtc_streamer(
+                key="yolo-inference",
+                video_processor_factory=lambda: VideoProcessor(
+                    self.model,
+                    self.conf,
+                    self.iou,
+                    self.selected_ind,
+                    self.enable_trk
+                ),
+                media_stream_constraints={"video": True, "audio": False},
+            )
             
-        if self.st.sidebar.button("Start"):
-            # If in cloud environment and webcam selected, offer single frame capture option
-            if self.is_cloud_environment() and self.source == "webcam":
-                self.capture_webcam_image()
-                return
+        elif self.source == "video":
+            self.source_upload()
+            self.configure()
+            if self.st.sidebar.button("Start"):
+                stop_button = self.st.button("Stop")
+                cap = cv2.VideoCapture(self.vid_file_name)
                 
-            stop_button = self.st.button("Stop")  # Button to stop the inference
-            
-            try:
-                cap = cv2.VideoCapture(self.vid_file_name)  # Capture the video
-                if not cap.isOpened():
-                    self.st.error("Could not open webcam or video source.")
-                    return
-
                 while cap.isOpened():
                     success, frame = cap.read()
                     if not success:
-                        self.st.warning("Failed to read frame from video source or reached end of video.")
+                        self.st.warning("End of video stream")
                         break
-
-                    # Process frame with model
-                    if self.enable_trk == "Yes":
-                        results = self.model.track(
-                            frame, conf=self.conf, iou=self.iou, classes=self.selected_ind, persist=True
-                        )
-                    else:
-                        results = self.model(frame, conf=self.conf, iou=self.iou, classes=self.selected_ind)
-
-                    annotated_frame = results[0].plot()  # Add annotations on frame
-
+                    
+                    results = self.model(frame, conf=self.conf, iou=self.iou, classes=self.selected_ind)
+                    annotated_frame = results[0].plot()
+                    
                     if stop_button:
-                        cap.release()  # Release the capture
-                        self.st.stop()  # Stop streamlit app
-
-                    self.org_frame.image(frame, channels="BGR")  # Display original frame
-                    self.ann_frame.image(annotated_frame, channels="BGR")  # Display processed frame
-
-                cap.release()  # Release the capture
-            except Exception as e:
-                self.st.error(f"An error occurred during inference: {str(e)}")
+                        cap.release()
+                        self.st.stop()
+                        
+                    self.org_frame.image(frame, channels="BGR")
+                    self.ann_frame.image(annotated_frame, channels="BGR")
                 
-        cv2.destroyAllWindows()  # Destroy all OpenCV windows
-
+                cap.release()
+                cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    import sys  # Import the sys module for accessing command-line arguments
-
-    # Check if a model name is provided as a command-line argument
-    args = len(sys.argv)
-    model = sys.argv[1] if args > 1 else None  # Assign first argument as the model name if provided
-    # Create an instance of the Inference class and run inference
+    import sys
+    model = sys.argv[1] if len(sys.argv) > 1 else None
     Inference(model=model).inference()
