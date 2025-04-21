@@ -118,19 +118,14 @@ class Inference:
         
         if self.source == "webcam":
             self.configure()
+            # In the inference() method's webrtc_streamer call:
             webrtc_ctx = webrtc_streamer(
                 key="yolo-webrtc",
-                video_processor_factory=lambda: VideoProcessor(
-                    self.model,
-                    self.conf,
-                    self.iou,
-                    self.selected_ind,
-                    self.enable_trk
-                ),
+                video_processor_factory=lambda: VideoProcessor(...),
                 rtc_configuration=RTCConfiguration({
                     "iceServers": [
-                        {"urls": "stun:stun.l.google.com:19302"},
-                        {"urls": "stun:global.stun.twilio.com:3478"}
+                        {"urls": ["stun:stun1.l.google.com:19302",
+                                  "stun:stun2.l.google.com:19302"]}
                     ]
                 }),
                 media_stream_constraints={"video": True, "audio": False},
