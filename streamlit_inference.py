@@ -2,6 +2,7 @@
 
 import io
 from typing import Any
+import os
 
 import cv2
 
@@ -72,6 +73,16 @@ class Inference:
 
         LOGGER.info(f"Ultralytics Solutions: ✅ {self.temp_dict}")
 
+    def is_cloud_environment(self):
+        """Check if the app is running in a cloud environment like Streamlit Cloud"""
+        # Various environment variables that might indicate cloud deployment
+        return any([
+            os.environ.get('STREAMLIT_SHARING') == 'true',
+            os.environ.get('IS_STREAMLIT_CLOUD') == 'true',
+            os.environ.get('HEROKU_APP_ID'),
+            os.environ.get('DYNO')
+        ])
+
     def web_ui(self):
         """Sets up the Streamlit web interface with custom HTML elements."""
         menu_style_cfg = """<style>MainMenu {visibility: hidden;}</style>"""  # Hide main menu style
@@ -115,6 +126,12 @@ class Inference:
     def source_upload(self):
         """Handle video file uploads through the Streamlit interface."""
         self.vid_file_name = ""
+        
+        # Check if we're in cloud environment
+        if self.is_cloud_environment() and self.source == "webcam":
+            self.st.warning("⚠️ Webcam access may be limited when deployed to Streamlit sharing. " +
+                          "For best results, please use the 'video' option and upload a video file.")
+        
         if self.source == "video":
             vid_file = self.st.sidebar.file_uploader("Upload Video File", type=["mp4", "mov", "avi", "mkv"])
             if vid_file is not None:
@@ -125,6 +142,38 @@ class Inference:
         elif self.source == "webcam":
             self.vid_file_name = 0  # Use webcam index 0
 
+    def capture_webcam_image(self):
+        """Capture a single image from webcam for demo purposes"""
+        self.st.info("📸 Click the button below to capture a single frame from your webcam")
+        if self.st.button("Capture Image"):
+            try:
+                cap = cv2.VideoCapture(0)
+                success, frame = cap.read()
+                cap.release()
+                
+                if success:
+                    # Process the single frame with the model
+                    if self.enable_trk == "Yes":
+                        results = self.model.track(
+                            frame, conf=self.conf, iou=self.iou, classes=self.selected_ind, persist=True
+                        )
+                    else:
+                        results = self.model(frame, conf=self.conf, iou=self.iou, classes=self.selected_ind)
+                        
+                    annotated_frame = results[0].plot()
+                    
+                    # Display frames
+                    self.org_frame.image(frame, channels="BGR")
+                    self.ann_frame.image(annotated_frame, channels="BGR")
+                    return True
+                else:
+                    self.st.error("Failed to capture webcam image. Please try again or upload a video.")
+                    return False
+            except Exception as e:
+                self.st.error(f"Error accessing webcam: {str(e)}")
+                return False
+        return False
+
     def configure(self):
         """Configure the model and load selected classes for inference."""
         # Add dropdown menu for model selection
@@ -134,9 +183,13 @@ class Inference:
         selected_model = self.st.sidebar.selectbox("Model", available_models)
 
         with self.st.spinner("Model is downloading..."):
-            self.model = YOLO(f"{selected_model.lower()}.pt")  # Load the YOLO model
-            class_names = list(self.model.names.values())  # Convert dictionary to list of class names
-        self.st.success("Model loaded successfully!")
+            try:
+                self.model = YOLO(f"{selected_model.lower()}.pt")  # Load the YOLO model
+                class_names = list(self.model.names.values())  # Convert dictionary to list of class names
+                self.st.success("Model loaded successfully!")
+            except Exception as e:
+                self.st.error(f"Error loading model: {str(e)}")
+                return False
 
         # Multiselect box with class names and get indices of selected classes
         selected_classes = self.st.sidebar.multiselect("Classes", class_names, default=class_names[:3])
@@ -144,45 +197,59 @@ class Inference:
 
         if not isinstance(self.selected_ind, list):  # Ensure selected_options is a list
             self.selected_ind = list(self.selected_ind)
+            
+        return True
 
     def inference(self):
         """Perform real-time object detection inference on video or webcam feed."""
         self.web_ui()  # Initialize the web interface
         self.sidebar()  # Create the sidebar
         self.source_upload()  # Upload the video source
-        self.configure()  # Configure the app
-
+        
+        if not self.configure():  # Configure the app
+            return
+            
         if self.st.sidebar.button("Start"):
-            stop_button = self.st.button("Stop")  # Button to stop the inference
-            cap = cv2.VideoCapture(self.vid_file_name)  # Capture the video
-            if not cap.isOpened():
-                self.st.error("Could not open webcam or video source.")
+            # If in cloud environment and webcam selected, offer single frame capture option
+            if self.is_cloud_environment() and self.source == "webcam":
+                self.capture_webcam_image()
                 return
+                
+            stop_button = self.st.button("Stop")  # Button to stop the inference
+            
+            try:
+                cap = cv2.VideoCapture(self.vid_file_name)  # Capture the video
+                if not cap.isOpened():
+                    self.st.error("Could not open webcam or video source.")
+                    return
 
-            while cap.isOpened():
-                success, frame = cap.read()
-                if not success:
-                    self.st.warning("Failed to read frame from webcam. Please verify the webcam is connected properly.")
-                    break
+                while cap.isOpened():
+                    success, frame = cap.read()
+                    if not success:
+                        self.st.warning("Failed to read frame from video source or reached end of video.")
+                        break
 
-                # Process frame with model
-                if self.enable_trk == "Yes":
-                    results = self.model.track(
-                        frame, conf=self.conf, iou=self.iou, classes=self.selected_ind, persist=True
-                    )
-                else:
-                    results = self.model(frame, conf=self.conf, iou=self.iou, classes=self.selected_ind)
+                    # Process frame with model
+                    if self.enable_trk == "Yes":
+                        results = self.model.track(
+                            frame, conf=self.conf, iou=self.iou, classes=self.selected_ind, persist=True
+                        )
+                    else:
+                        results = self.model(frame, conf=self.conf, iou=self.iou, classes=self.selected_ind)
 
-                annotated_frame = results[0].plot()  # Add annotations on frame
+                    annotated_frame = results[0].plot()  # Add annotations on frame
 
-                if stop_button:
-                    cap.release()  # Release the capture
-                    self.st.stop()  # Stop streamlit app
+                    if stop_button:
+                        cap.release()  # Release the capture
+                        self.st.stop()  # Stop streamlit app
 
-                self.org_frame.image(frame, channels="BGR")  # Display original frame
-                self.ann_frame.image(annotated_frame, channels="BGR")  # Display processed frame
+                    self.org_frame.image(frame, channels="BGR")  # Display original frame
+                    self.ann_frame.image(annotated_frame, channels="BGR")  # Display processed frame
 
-            cap.release()  # Release the capture
+                cap.release()  # Release the capture
+            except Exception as e:
+                self.st.error(f"An error occurred during inference: {str(e)}")
+                
         cv2.destroyAllWindows()  # Destroy all OpenCV windows
 
 
