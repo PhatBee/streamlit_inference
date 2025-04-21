@@ -8,10 +8,10 @@ from ultralytics import YOLO
 from ultralytics.utils import LOGGER
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.downloads import GITHUB_ASSETS_STEMS
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
 
 class VideoProcessor(VideoTransformerBase):
-    """Custom video processor for real-time webcam inference."""
+    """Handles real-time video processing with YOLO model."""
     def __init__(self, model, conf, iou, selected_ind, enable_trk):
         self.model = model
         self.conf = conf
@@ -20,7 +20,7 @@ class VideoProcessor(VideoTransformerBase):
         self.enable_trk = enable_trk
 
     def recv(self, frame):
-        """Process each video frame."""
+        """Process each video frame with YOLO inference."""
         img = frame.to_ndarray(format="bgr24")
         
         if self.enable_trk == "Yes":
@@ -34,14 +34,14 @@ class VideoProcessor(VideoTransformerBase):
         return av.VideoFrame.from_ndarray(annotated_frame, format="bgr24")
 
 class Inference:
-    """Main inference class with Streamlit integration."""
+    """Main application class for Streamlit YOLO inference."""
     def __init__(self, **kwargs: Any):
         check_requirements("streamlit>=1.29.0")
         import streamlit as st
         
         self.st = st
         self.source = None
-        self.enable_trk = False
+        self.enable_trk = "No"
         self.conf = 0.25
         self.iou = 0.45
         self.org_frame = None
@@ -56,13 +56,18 @@ class Inference:
 
     def web_ui(self):
         """Configure Streamlit UI elements."""
-        menu_style = """<style>MainMenu {visibility: hidden;}</style>"""
-        main_title = """<div><h1 style="color:#FF64DA; text-align:center; font-size:40px; margin-top:-50px;
-        font-family: 'Archivo', sans-serif; margin-bottom:20px;">Ultralytics YOLO Streamlit Application</h1></div>"""
-        sub_title = """<div><h4 style="color:#042AFF; text-align:center; font-family: 'Archivo', sans-serif; 
-        margin-top:-15px; margin-bottom:50px;">Real-time object detection with Ultralytics YOLO! 🚀</h4></div>"""
+        menu_style = """<style>
+            MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+        </style>"""
+        main_title = """<div><h1 style="color:#FF64DA; text-align:center; font-size:40px; 
+            margin-top:-50px; font-family: 'Archivo', sans-serif; margin-bottom:20px;">
+            Ultralytics YOLO Streamlit App</h1></div>"""
+        sub_title = """<div><h4 style="color:#042AFF; text-align:center; 
+            font-family: 'Archivo', sans-serif; margin-top:-15px; margin-bottom:50px;">
+            Real-time object detection with YOLO 🚀</h4></div>"""
 
-        self.st.set_page_config(page_title="Ultralytics Streamlit App", layout="wide")
+        self.st.set_page_config(page_title="YOLO Streamlit App", layout="wide")
         self.st.markdown(menu_style, unsafe_allow_html=True)
         self.st.markdown(main_title, unsafe_allow_html=True)
         self.st.markdown(sub_title, unsafe_allow_html=True)
@@ -72,15 +77,13 @@ class Inference:
         with self.st.sidebar:
             logo = "https://raw.githubusercontent.com/ultralytics/assets/main/logo/Ultralytics_Logotype_Original.svg"
             self.st.image(logo, width=250)
-            self.st.title("User Configuration")
+            self.st.title("Configuration")
             self.source = self.st.selectbox("Video Source", ("webcam", "video"))
             self.enable_trk = self.st.radio("Enable Tracking", ("Yes", "No"))
-            self.conf = float(self.st.slider("Confidence Threshold", 0.0, 1.0, self.conf, 0.01))
+            self.conf = float(self.st.slider("Confidence", 0.0, 1.0, self.conf, 0.01))
             self.iou = float(self.st.slider("IoU Threshold", 0.0, 1.0, self.iou, 0.01))
 
-        col1, col2 = self.st.columns(2)
-        self.org_frame = col1.empty()
-        self.ann_frame = col2.empty()
+        self.org_frame, self.ann_frame = self.st.columns(2)
 
     def source_upload(self):
         """Handle video file uploads."""
@@ -88,13 +91,13 @@ class Inference:
         if self.source == "video":
             vid_file = self.st.sidebar.file_uploader("Upload Video", type=["mp4", "mov", "avi", "mkv"])
             if vid_file:
-                g = io.BytesIO(vid_file.read())
-                with open("temp_video.mp4", "wb") as out:
-                    out.write(g.read())
+                with io.BytesIO(vid_file.read()) as g:
+                    with open("temp_video.mp4", "wb") as out:
+                        out.write(g.read())
                 self.vid_file_name = "temp_video.mp4"
 
     def configure(self):
-        """Configure model and classes."""
+        """Configure model and class selection."""
         available_models = [x.replace("yolo", "YOLO") for x in GITHUB_ASSETS_STEMS if x.startswith("yolo11")]
         if self.model_path:
             available_models.insert(0, self.model_path.split(".pt")[0])
@@ -107,7 +110,6 @@ class Inference:
         
         selected_classes = self.st.sidebar.multiselect("Classes", class_names, default=class_names[:3])
         self.selected_ind = [class_names.index(option) for option in selected_classes]
-        self.selected_ind = list(self.selected_ind) if not isinstance(self.selected_ind, list) else self.selected_ind
 
     def inference(self):
         """Main inference pipeline."""
@@ -116,8 +118,8 @@ class Inference:
         
         if self.source == "webcam":
             self.configure()
-            ctx = webrtc_streamer(
-                key="yolo-inference",
+            webrtc_ctx = webrtc_streamer(
+                key="yolo-webrtc",
                 video_processor_factory=lambda: VideoProcessor(
                     self.model,
                     self.conf,
@@ -125,20 +127,27 @@ class Inference:
                     self.selected_ind,
                     self.enable_trk
                 ),
+                rtc_configuration=RTCConfiguration({
+                    "iceServers": [
+                        {"urls": "stun:stun.l.google.com:19302"},
+                        {"urls": "stun:global.stun.twilio.com:3478?transport=udp"}
+                    ]
+                }),
                 media_stream_constraints={"video": True, "audio": False},
+                async_processing=True
             )
             
         elif self.source == "video":
             self.source_upload()
             self.configure()
-            if self.st.sidebar.button("Start"):
+            if self.st.sidebar.button("Start Processing"):
                 stop_button = self.st.button("Stop")
                 cap = cv2.VideoCapture(self.vid_file_name)
                 
                 while cap.isOpened():
                     success, frame = cap.read()
                     if not success:
-                        self.st.warning("End of video stream")
+                        self.st.warning("Video processing completed")
                         break
                     
                     results = self.model(frame, conf=self.conf, iou=self.iou, classes=self.selected_ind)
